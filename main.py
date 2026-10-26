@@ -3,7 +3,7 @@ import string
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl
 
 app = FastAPI()
 
@@ -12,7 +12,7 @@ links = {}
 
 
 class LinkCreate(BaseModel):
-    url: str
+    url: HttpUrl
 
 
 @app.get("/health")
@@ -31,15 +31,17 @@ def shorten_url(link: LinkCreate):
         secrets.choice(characters) for _ in range(6)
     )
 
+    original_url = str(link.url)
+
     # Save the URL and initialize its click count
     links[short_code] = {
-        "original_url": link.url,
+        "original_url": original_url,
         "clicks": 0
     }
 
     return {
         "short_code": short_code,
-        "original_url": link.url,
+        "original_url": original_url,
         "clicks": 0
     }
 
