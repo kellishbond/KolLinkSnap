@@ -1,3 +1,4 @@
+
 import secrets
 import string
 
@@ -30,6 +31,12 @@ def shorten_url(link: LinkCreate):
     short_code = ''.join(
         secrets.choice(characters) for _ in range(6)
     )
+
+    # Generate a new code if the first one already exists
+    while short_code in links:
+        short_code = ''.join(
+            secrets.choice(characters) for _ in range(6)
+        )
 
     original_url = str(link.url)
 
@@ -76,7 +83,6 @@ def redirect_url(short_code: str):
     # Increase the click count by one
     link_data["clicks"] += 1
 
-    # Redirect the visitor to the original URL
     return RedirectResponse(
         url=link_data["original_url"]
     )
