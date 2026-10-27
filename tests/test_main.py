@@ -1,16 +1,16 @@
 
 import pytest
 from fastapi.testclient import TestClient
-
-import cache
 import limiter
+import cache
 import main
-
+from redis.exceptions import RedisError
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     test_database = tmp_path / "test_kollinksnap.db"
 
+    # Use a separate temporary SQLite database for each test.
     monkeypatch.setattr(
         main,
         "get_connection",
@@ -23,15 +23,36 @@ def client(tmp_path, monkeypatch):
         lambda: create_table_for_test(test_database)
     )
 
-    # Give each test fresh cache and rate-limit state
-    monkeypatch.setattr(cache, "url_cache", {})
-    monkeypatch.setattr(limiter, "request_counts", {})
+    # Reset rate-limit counters before each test.
+    # monkeypatch.setattr(limiter, "request_counts", {})
+    clear_rate_limit_counters()
+
+    # Clear only KolLinkSnap's Redis cache keys.
+    clear_url_cache()
 
     create_table_for_test(test_database)
 
-    with TestClient(main.app) as test_client:
-        yield test_client
+    try:
+        with TestClient(main.app) as test_client:
+            yield test_client
+    finally:
+        clear_url_cache()
 
+
+def clear_url_cache():
+    """Delete KolLinkSnap cache entries without clearing all Redis data."""
+    for key in cache.redis_client.scan_iter(
+        match="kollinksnap:url:*"
+    ):
+        cache.redis_client.delete(key)
+
+
+def clear_rate_limit_counters():
+    """Delete KolLinkSnap rate-limit keys."""
+    for key in cache.redis_client.scan_iter(
+        match="kollinksnap:ratelimit:*"
+    ):
+        cache.redis_client.delete(key)
 
 def get_connection_for_test(database_path):
     import sqlite3
@@ -175,7 +196,6 @@ def test_cached_redirect_still_increases_clicks(client):
 
     short_code = create_response.json()["short_code"]
 
-    # First visit fills the cache
     first_visit = client.get(
         f"/{short_code}",
         follow_redirects=False
@@ -184,7 +204,6 @@ def test_cached_redirect_still_increases_clicks(client):
     assert first_visit.status_code == 307
     assert cache.get_cached_url(short_code) is not None
 
-    # Second visit should use the cached destination
     second_visit = client.get(
         f"/{short_code}",
         follow_redirects=False
@@ -198,3 +217,64 @@ def test_cached_redirect_still_increases_clicks(client):
 
     assert stats_response.status_code == 200
     assert stats_response.json()["clicks"] == 2
+
+
+def test_cached_url_expires_after_five_minutes(client):
+    cache.cache_url("expire1", "https://example.com/")
+
+    ttl = cache.redis_client.ttl("kollinksnap:url:expire1")
+
+    assert 0 < ttl <= cache.CACHE_TTL_SECONDS
+
+
+def test_redirect_falls_back_to_sqlite_when_redis_fails(
+    client, monkeypatch
+):
+    create_response = client.post(
+        "/api/v1/shorten",
+        json={"url": "https://example.com"}
+    )
+
+    assert create_response.status_code == 200
+    short_code = create_response.json()["short_code"]
+
+    def redis_unavailable(*args, **kwargs):
+        raise RedisError("Redis unavailable")
+
+    # Simulate Redis failing during cache reads and writes.
+    monkeypatch.setattr(
+        cache.redis_client, "get", redis_unavailable
+    )
+    monkeypatch.setattr(
+        cache.redis_client, "set", redis_unavailable
+    )
+
+    response = client.get(
+        f"/{short_code}",
+        follow_redirects=False
+    )
+
+    # The app should still redirect using the SQLite record.
+    assert response.status_code == 307
+    assert response.headers["location"] == "https://example.com/"
+
+
+def test_rate_limiter_returns_503_when_redis_fails(
+    client, monkeypatch
+):
+    def redis_unavailable(*args, **kwargs):
+        raise RedisError("Redis unavailable")
+
+    monkeypatch.setattr(
+        limiter.redis_client, "eval", redis_unavailable
+    )
+
+    response = client.post(
+        "/api/v1/shorten",
+        json={"url": "https://example.com"}
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Rate limiting service unavailable. Try again later."
+    )

@@ -258,6 +258,64 @@ This project demonstrates:
 - Automated API testing.
 - Basic security considerations.
 
+## Redis Setup
+
+KolLinkSnap uses Redis for URL caching and rate limiting.
+
+### Install Redis on Ubuntu
+
+```bash
+sudo apt update
+sudo apt install redis-server redis-tools
+sudo systemctl enable --now redis-server
+redis-cli ping
+```
+
+A successful connection returns `PONG`.
+
+### Install Python dependencies
+
+Activate your virtual environment, then run:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Configure Redis
+
+By default, the application connects to Redis at:
+
+```text
+redis://localhost:6379/0
+```
+
+To use a different Redis server, set the `REDIS_URL` environment variable before starting the application.
+
+For example:
+
+```bash
+export REDIS_URL="redis://localhost:6379/0"
+```
+
+Keep Redis credentials out of source control when using a hosted Redis service.
+
+### Redis behavior
+
+- Cached URLs expire after five minutes.
+- Rate-limit counters use a 60-second fixed window.
+- URL redirects can fall back to SQLite when Redis caching is unavailable.
+- URL-shortening requests return HTTP 503 if Redis cannot enforce rate limiting.
+
+SQLite remains the permanent store for shortened links and click counts.
+
+### Run tests
+
+```bash
+python -m pytest -q
+```
+
+Redis must be running for the test suite because the tests use Redis for caching and rate limiting.
+
 ## License
 
 No license has been specified yet. Add a license before distributing the project for reuse.

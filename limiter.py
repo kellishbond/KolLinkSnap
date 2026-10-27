@@ -1,40 +1,46 @@
 
-import time
-
 from fastapi import HTTPException, Request
+from redis.exceptions import RedisError
+
+from cache import redis_client
 
 
 REQUEST_LIMIT = 5
 WINDOW_SECONDS = 60
 
-request_counts = {}
+INCREMENT_COUNTER_SCRIPT = """
+local count = redis.call("INCR", KEYS[1])
+
+if count == 1 then
+    redis.call("EXPIRE", KEYS[1], ARGV[1])
+end
+
+return count
+"""
 
 
 def check_rate_limit(request: Request):
-    client_ip = request.client.host
-    current_time = time.time()
+    """Allow at most five requests per IP in a 60-second window."""
+    client_ip = request.client.host if request.client else "unknown"
 
-    if client_ip not in request_counts:
-        request_counts[client_ip] = {
-            "count": 0,
-            "start_time": current_time
-        }
+    key = f"kollinksnap:ratelimit:shorten:{client_ip}"
 
-    client_data = request_counts[client_ip]
-
-    elapsed_time = current_time - client_data["start_time"]
-
-    # Reset the window after 60 seconds
-    if elapsed_time >= WINDOW_SECONDS:
-        client_data["count"] = 0
-        client_data["start_time"] = current_time
-
-    # Reject the request if the limit has been reached
-    if client_data["count"] >= REQUEST_LIMIT:
+    try:
+        request_count = redis_client.eval(
+            INCREMENT_COUNTER_SCRIPT,
+            1,
+            key,
+            WINDOW_SECONDS,
+        )
+    except RedisError:
+        # Fail safely rather than bypassing rate limiting.
         raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded. Try again later."
+            status_code=503,
+            detail="Rate limiting service unavailable. Try again later.",
         )
 
-    # Count this request
-    client_data["count"] += 1
+    if request_count > REQUEST_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Try again later.",
+        )
