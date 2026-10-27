@@ -1,4 +1,3 @@
-
 import secrets
 import string
 
@@ -6,10 +5,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, HttpUrl
 
+from database import create_table, get_connection
+
 app = FastAPI()
 
-# Store short codes, original URLs, and click counts
-links = {}
+# Make sure the database table exists
+create_table()
 
 
 class LinkCreate(BaseModel):
@@ -28,61 +29,103 @@ def health_check():
 def shorten_url(link: LinkCreate):
     characters = string.ascii_letters + string.digits
 
-    short_code = ''.join(
-        secrets.choice(characters) for _ in range(6)
-    )
+    connection = get_connection()
 
-    # Generate a new code if the first one already exists
-    while short_code in links:
-        short_code = ''.join(
-            secrets.choice(characters) for _ in range(6)
+    try:
+        # Generate a unique short code
+        while True:
+            short_code = ''.join(
+                secrets.choice(characters) for _ in range(6)
+            )
+
+            existing_link = connection.execute(
+                "SELECT short_code FROM links WHERE short_code = ?",
+                (short_code,)
+            ).fetchone()
+
+            if existing_link is None:
+                break
+
+        original_url = str(link.url)
+
+        # Save the new link in SQLite
+        connection.execute(
+            """
+            INSERT INTO links (short_code, original_url, clicks)
+            VALUES (?, ?, 0)
+            """,
+            (short_code, original_url)
         )
 
-    original_url = str(link.url)
+        connection.commit()
 
-    # Save the URL and initialize its click count
-    links[short_code] = {
-        "original_url": original_url,
-        "clicks": 0
-    }
+        return {
+            "short_code": short_code,
+            "original_url": original_url,
+            "clicks": 0
+        }
 
-    return {
-        "short_code": short_code,
-        "original_url": original_url,
-        "clicks": 0
-    }
+    finally:
+        connection.close()
 
 
 @app.get("/stats/{short_code}")
 def get_link_stats(short_code: str):
-    link_data = links.get(short_code)
+    connection = get_connection()
 
-    if link_data is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Short link not found"
-        )
+    try:
+        link_data = connection.execute(
+            "SELECT * FROM links WHERE short_code = ?",
+            (short_code,)
+        ).fetchone()
 
-    return {
-        "short_code": short_code,
-        "original_url": link_data["original_url"],
-        "clicks": link_data["clicks"]
-    }
+        if link_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Short link not found"
+            )
+
+        return {
+            "short_code": link_data["short_code"],
+            "original_url": link_data["original_url"],
+            "clicks": link_data["clicks"]
+        }
+
+    finally:
+        connection.close()
 
 
 @app.get("/{short_code}")
 def redirect_url(short_code: str):
-    link_data = links.get(short_code)
+    connection = get_connection()
 
-    if link_data is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Short link not found"
+    try:
+        link_data = connection.execute(
+            "SELECT original_url FROM links WHERE short_code = ?",
+            (short_code,)
+        ).fetchone()
+
+        if link_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Short link not found"
+            )
+
+        # Increase the click count in the database
+        connection.execute(
+            """
+            UPDATE links
+            SET clicks = clicks + 1
+            WHERE short_code = ?
+            """,
+            (short_code,)
         )
 
-    # Increase the click count by one
-    link_data["clicks"] += 1
+        connection.commit()
 
-    return RedirectResponse(
-        url=link_data["original_url"]
-    )
+        return RedirectResponse(
+            url=link_data["original_url"]
+        )
+
+    finally:
+        connection.close()
